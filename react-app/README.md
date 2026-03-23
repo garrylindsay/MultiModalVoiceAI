@@ -83,6 +83,26 @@ react-app/
 
 ## Initial Setup
 
+### Option A — Automated setup (recommended for new machines)
+
+If you have the [GitHub CLI](https://cli.github.com/) installed and are authenticated (`gh auth login`), a single script will pull all configuration from GitHub and prompt you only for your API keys:
+
+```bash
+# From the repo root
+chmod +x setup.sh && ./setup.sh
+```
+
+The script:
+- Fetches non-sensitive config automatically from GitHub Variables
+- Prompts (with hidden input) for your OpenAI and Google API keys
+- Writes both `.env` files ready to go
+
+Then skip to [Install dependencies](#1-install-dependencies).
+
+---
+
+### Option B — Manual setup
+
 ### 1. Install dependencies
 
 ```bash
