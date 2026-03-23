@@ -1,0 +1,10 @@
+opencv-python
+SpeechRecognition
+python-dotenv
+git+https://github.com/openai/whisper.git
+pyaudio
+soundfile
+langchain
+langchain-community
+langchain_google_genai
+langchain-openai

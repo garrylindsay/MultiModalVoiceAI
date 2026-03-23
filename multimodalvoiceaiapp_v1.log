@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/Users/gjlindsay/git/AI/MultiModalVoiceAI/multimodalvoiceaiapp_v1.py", line 6, in <module>
+    import cv2
+ModuleNotFoundError: No module named 'cv2'
