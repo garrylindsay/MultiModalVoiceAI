@@ -9,6 +9,9 @@ import path from 'path';
 import fs from 'fs';
 import https from 'https';
 import { fileURLToPath } from 'url';
+import os from 'os';
+import crypto from 'crypto';
+import multer from 'multer';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,10 +54,10 @@ if (process.env.GOOGLE_API_KEY) {
 
 // Always initialise LM Studio client (no key required)
 lmStudioClient = new OpenAI({
-  baseURL: process.env.LMSTUDIO_BASE_URL || 'http://localhost:1234/v1',
+  baseURL: process.env.LMSTUDIO_BASE_URL || 'http://127.0.0.1:1234/v1',
   apiKey: 'lm-studio',
 });
-console.log(`LLM Provider available: LM Studio @ ${process.env.LMSTUDIO_BASE_URL || 'http://localhost:1234/v1'} (${process.env.LMSTUDIO_MODEL || 'auto'})`);
+console.log(`LLM Provider available: LM Studio @ ${process.env.LMSTUDIO_BASE_URL || 'http://127.0.0.1:1234/v1'} (${process.env.LMSTUDIO_MODEL || 'auto'})`);
 
 // Initialize OpenAI client for TTS and STT (cloud paths)
 const openai = process.env.OPENAI_API_KEY
@@ -427,30 +430,40 @@ app.post('/api/tts', async (req, res) => {
 });
 
 // Speech-to-Text endpoint (Whisper API)
-// API key is used server-side only, never exposed to client
-app.post('/api/stt', async (req, res) => {
-  try {
-    const { audioBase64 } = req.body;
+// Accepts multipart FormData with an "audio" file field
+const sttUpload = multer({ 
+  storage: multer.diskStorage({
+    destination: os.tmpdir(),
+    filename: (_req, file, cb) => cb(null, `stt-${crypto.randomUUID()}${path.extname(file.originalname) || '.webm'}`),
+  }),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB max (Whisper limit)
+});
 
-    if (!audioBase64) {
-      return res.status(400).json({ error: 'Audio data is required' });
+app.post('/api/stt', sttUpload.single('audio'), async (req, res) => {
+  let tmpPath = null;
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Audio file is required. Send as FormData with field name "audio".' });
     }
 
     if (!openai) {
       return res.status(500).json({ error: 'Server configuration error: OpenAI API key not configured' });
     }
 
-    // Convert base64 to buffer
-    const audioBuffer = Buffer.from(audioBase64, 'base64');
-    
-    // Create a File object for the API
-    const audioFile = new File([audioBuffer], 'audio.webm', { type: 'audio/webm' });
+    tmpPath = req.file.path;
+    console.log(`[STT] Received: ${req.file.originalname}, ${req.file.size} bytes, mime: ${req.file.mimetype}`);
+
+    // Reject tiny files — Whisper hallucinates on near-empty audio
+    if (req.file.size < 1024) {
+      return res.status(400).json({ error: 'Audio clip too short. Please speak longer and try again.' });
+    }
 
     const transcription = await openai.audio.transcriptions.create({
-      file: audioFile,
+      file: fs.createReadStream(tmpPath),
       model: process.env.OPENAI_STT_MODEL || 'whisper-1',
       language: 'en',
     });
+    console.log(`[STT] Transcription: "${transcription.text}"`);
 
     res.json({ 
       text: transcription.text 
@@ -495,6 +508,11 @@ app.post('/api/stt', async (req, res) => {
       errorType: 'unknown',
       detail: process.env.NODE_ENV === 'development' ? msg : undefined
     });
+  } finally {
+    // Clean up temp file
+    if (tmpPath) {
+      try { fs.unlinkSync(tmpPath); } catch (_) { /* ignore */ }
+    }
   }
 });
 

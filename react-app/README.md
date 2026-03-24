@@ -83,13 +83,21 @@ react-app/
 
 ## Initial Setup
 
+> 💡 **Tip:** Hover over any code block below and click the 📋 icon in the top-right corner to copy the command.
+
 ### Option A — Automated setup (recommended for new machines)
 
 If you have the [GitHub CLI](https://cli.github.com/) installed and are authenticated (`gh auth login`), a single script will pull all configuration from GitHub and prompt you only for your API keys:
 
+**macOS / Linux:**
 ```bash
 # From the repo root
 chmod +x setup.sh && ./setup.sh
+```
+
+**Windows (Git Bash or WSL):**
+```bash
+bash setup.sh
 ```
 
 The script:
@@ -97,24 +105,38 @@ The script:
 - Prompts (with hidden input) for your OpenAI and Google API keys
 - Writes both `.env` files ready to go
 
+> **Note — GitHub Secrets are write-only.**  
+> The setup script fetches *variables* (non-sensitive config) from GitHub, but API keys are stored as GitHub *secrets*, which **cannot be read back** via the API, CLI, or web UI — this is a core GitHub security feature. You must supply your API keys manually when prompted. Retrieve them from:
+> - **OpenAI:** https://platform.openai.com/api-keys  
+> - **Google:** https://console.cloud.google.com/apis/credentials
+
 Then skip to [Install dependencies](#1-install-dependencies).
 
 ---
 
 ### Option B — Manual setup
 
-### 1. Install dependencies
+### 📋 1. Install dependencies
 
+**macOS / Linux:**
 ```bash
 cd react-app
 npm install
 cd server && npm install && cd ..
 ```
 
-### 2. Generate SSL certificates
+**Windows (PowerShell):**
+```powershell
+cd react-app
+npm install
+cd server; npm install; cd ..
+```
+
+### 📋 2. Generate SSL certificates
 
 Required for HTTPS (camera/microphone access needs a secure context):
 
+**macOS / Linux:**
 ```bash
 # Replace 192.168.1.186 with your machine's local IP
 mkdir -p certs
@@ -125,12 +147,30 @@ openssl req -x509 -newkey rsa:2048 \
   -addext "subjectAltName=DNS:localhost,IP:192.168.1.186,IP:127.0.0.1"
 ```
 
-Find your local IP with:
+**Windows (PowerShell):**
+```powershell
+# Replace 192.168.1.186 with your machine's local IP
+New-Item -ItemType Directory -Force -Path certs
+openssl req -x509 -newkey rsa:2048 `
+  -keyout certs/key.pem -out certs/cert.pem `
+  -days 365 -nodes `
+  -subj "/CN=localhost" `
+  -addext "subjectAltName=DNS:localhost,IP:192.168.1.186,IP:127.0.0.1"
+```
+
+> **Note:** On Windows, openssl is included with Git for Windows. If not found, install it via `winget install ShiningLight.OpenSSL`.
+
+Find your local IP:
 ```bash
 ipconfig getifaddr en0    # macOS
 ```
+```powershell
+(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias Wi-Fi).IPAddress   # Windows
+```
 
-### 3. Configure environment
+> **Windows note:** Use `127.0.0.1` instead of `localhost` in `LMSTUDIO_BASE_URL` to avoid IPv6 resolution issues.
+
+### 📋 3. Configure environment
 
 Edit `server/.env`:
 
@@ -179,7 +219,7 @@ NODE_ENV=development
 
 Runs the **Vite dev server** (port 5173, hot reload) and the **Express backend** (port 3001) concurrently. Vite proxies `/api/*` requests to the backend automatically.
 
-### Start
+### 📋 Start
 
 ```bash
 cd react-app
@@ -195,18 +235,33 @@ npm run dev:server   # Express only (port 3001)
 
 Open **https://localhost:5173** (accept the self-signed cert warning).
 
-### Restart (both servers)
+### 📋 Restart (both servers)
 
+**macOS / Linux:**
 ```bash
 lsof -ti:3001 | xargs kill -9 2>/dev/null; lsof -ti:5173 | xargs kill -9 2>/dev/null; sleep 1 && cd react-app && npm run dev
 ```
 
-### Restart backend only
+**Windows (PowerShell):**
+```powershell
+Get-Process -Id (Get-NetTCPConnection -LocalPort 3001 -State Listen -EA 0).OwningProcess -EA 0 | Stop-Process -Force -EA 0
+Get-Process -Id (Get-NetTCPConnection -LocalPort 5173 -State Listen -EA 0).OwningProcess -EA 0 | Stop-Process -Force -EA 0
+Start-Sleep 2; cd react-app; npm run dev
+```
+
+### 📋 Restart backend only
 
 Use this after editing `server/server.js` or `server/.env`:
 
+**macOS / Linux:**
 ```bash
 lsof -ti:3001 | xargs kill -9 2>/dev/null; sleep 1 && cd react-app && npm run dev:server
+```
+
+**Windows (PowerShell):**
+```powershell
+Get-Process -Id (Get-NetTCPConnection -LocalPort 3001 -State Listen -EA 0).OwningProcess -EA 0 | Stop-Process -Force -EA 0
+Start-Sleep 2; cd react-app; npm run dev:server
 ```
 
 ---
@@ -215,27 +270,49 @@ lsof -ti:3001 | xargs kill -9 2>/dev/null; sleep 1 && cd react-app && npm run de
 
 The Vite frontend is compiled into static files served directly by Express on a single port.
 
-### Build + Start
+### 📋 Build + Start
 
+**macOS / Linux:**
 ```bash
 cd react-app
 npm run build
 NODE_ENV=production node server/server.js
 ```
 
+**Windows (PowerShell):**
+```powershell
+cd react-app
+npm run build
+$env:NODE_ENV="production"; node server/server.js
+```
+
 Or simply:
 
+**macOS / Linux:**
 ```bash
 cd react-app
 npm run build && npm start
 ```
 
+**Windows (PowerShell):**
+```powershell
+cd react-app
+npm run build; npm start
+```
+
 The app is served at **https://localhost:3001** (single port — no Vite server needed).
 
-### Restart (production)
+### 📋 Restart (production)
 
+**macOS / Linux:**
 ```bash
 lsof -ti:3001 | xargs kill -9 2>/dev/null; sleep 1 && cd react-app && NODE_ENV=production node server/server.js
+```
+
+**Windows (PowerShell):**
+```powershell
+Get-Process -Id (Get-NetTCPConnection -LocalPort 3001 -State Listen -EA 0).OwningProcess -EA 0 | Stop-Process -Force -EA 0
+Start-Sleep 2; cd react-app; $env:NODE_ENV="production"; node server/server.js
 ```
 
 ---
@@ -271,4 +348,4 @@ You'll need to accept the self-signed certificate warning on the device. Make su
 | CORS errors | Make sure both servers are running; check `vite.config.js` proxy |
 | Cannot connect to LM Studio | Ensure LM Studio is open with local server enabled and a model loaded |
 | AI response is truncated or empty | Increase `max_tokens` in `server/server.js` (thinking models use tokens for reasoning) |
-| Port already in use | `lsof -ti:3001 \| xargs kill -9` and/or `lsof -ti:5173 \| xargs kill -9` |
+| Port already in use | **macOS/Linux:** `lsof -ti:3001 \| xargs kill -9` / `lsof -ti:5173 \| xargs kill -9` — **Windows:** `Get-Process -Id (Get-NetTCPConnection -LocalPort 3001 -State Listen -EA 0).OwningProcess -EA 0 \| Stop-Process -Force` |

@@ -16,6 +16,12 @@ export function useSpeechRecognition(onResult, sttProvider = 'local', onError) {
   const lastSttDurationRef = useRef(0);
   const sttProviderRef = useRef(sttProvider);
 
+  // Stable refs for callbacks — avoids tearing down recognition when parent re-renders
+  const onResultRef = useRef(onResult);
+  const onErrorRef = useRef(onError);
+  useEffect(() => { onResultRef.current = onResult; }, [onResult]);
+  useEffect(() => { onErrorRef.current = onError; }, [onError]);
+
   // Keep ref in sync so callbacks always see latest value
   useEffect(() => {
     sttProviderRef.current = sttProvider;
@@ -25,6 +31,13 @@ export function useSpeechRecognition(onResult, sttProvider = 'local', onError) {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const streamRef = useRef(null);
+
+  // ---- Silence detection refs ----
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const silenceFrameRef = useRef(0);       // consecutive silent frames
+  const speechDetectedRef = useRef(false); // has the user spoken yet?
+  const silenceTimerRef = useRef(null);    // RAF id
 
   // Detect browser support for local Web Speech API
   useEffect(() => {
@@ -64,6 +77,19 @@ export function useSpeechRecognition(onResult, sttProvider = 'local', onError) {
       recognition.onstart = () => {
         listenStartRef.current = Date.now();
         setIsListening(true);
+        console.log('[Local STT] Recognition started — listening for speech...');
+      };
+
+      recognition.onaudiostart = () => {
+        console.log('[Local STT] Audio capture started');
+      };
+
+      recognition.onsoundstart = () => {
+        console.log('[Local STT] Sound detected');
+      };
+
+      recognition.onspeechstart = () => {
+        console.log('[Local STT] Speech detected');
       };
 
       recognition.onresult = (event) => {
@@ -73,26 +99,31 @@ export function useSpeechRecognition(onResult, sttProvider = 'local', onError) {
           ? parseFloat(((Date.now() - listenStartRef.current) / 1000).toFixed(1))
           : 0;
         lastSttDurationRef.current = sttSeconds;
-        console.log(`[Local STT] "${transcript}" (confidence: ${(confidence * 100).toFixed(1)}%, ${sttSeconds}s)`);
-        if (onResult && transcript) onResult(transcript, sttSeconds);
+        console.log(`[Local STT] Result: "${transcript}" (confidence: ${(confidence * 100).toFixed(1)}%, ${sttSeconds}s)`);
+        if (onResultRef.current && transcript) onResultRef.current(transcript, sttSeconds);
+      };
+
+      recognition.onnomatch = () => {
+        console.warn('[Local STT] No match — speech was heard but not recognized');
       };
 
       recognition.onerror = (event) => {
-        console.error('Speech recognition error:', event.error);
+        console.error(`[Local STT] Error: ${event.error} (message: ${event.message || 'none'})`);
         setIsListening(false);
-        if (onError) {
-          onError(event.error);
-        }
-        if (event.error !== 'no-speech' && event.error !== 'aborted') {
-          console.warn('Speech recognition error:', event.error);
+        if (onErrorRef.current) {
+          onErrorRef.current(event.error);
         }
       };
 
       recognition.onend = () => {
+        console.log('[Local STT] Recognition ended');
         setIsListening(false);
       };
 
       recognitionRef.current = recognition;
+      console.log(`[Local STT] SpeechRecognition initialized (${browserName})`);
+    } else {
+      console.warn(`[Local STT] Not supported in ${browserName} — cloud STT still available`);
     }
 
     return () => {
@@ -100,7 +131,7 @@ export function useSpeechRecognition(onResult, sttProvider = 'local', onError) {
         try { recognitionRef.current.abort(); } catch (_) { /* ignore */ }
       }
     };
-  }, [onResult]);
+  }, []); // Run once — callbacks use stable refs
 
   // Keep isSupported in sync when provider changes
   useEffect(() => {
@@ -113,9 +144,105 @@ export function useSpeechRecognition(onResult, sttProvider = 'local', onError) {
   }, [sttProvider]);
 
   // ---- Cloud STT helpers ----
+
+  // Silence detection constants
+  const SILENCE_THRESHOLD = 15;     // RMS below this = silence (0-255 scale)
+  const SPEECH_THRESHOLD = 20;      // RMS above this = speech detected
+  const SILENCE_DURATION_MS = 1800; // ms of silence after speech before auto-stop
+  const MIN_RECORDING_MS = 800;     // minimum recording time before silence can trigger
+
+  const stopSilenceDetection = useCallback(() => {
+    if (silenceTimerRef.current) {
+      cancelAnimationFrame(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+    analyserRef.current = null;
+    silenceFrameRef.current = 0;
+    speechDetectedRef.current = false;
+  }, []);
+
+  const startSilenceDetection = useCallback((stream) => {
+    try {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.3;
+      source.connect(analyser);
+
+      audioContextRef.current = audioCtx;
+      analyserRef.current = analyser;
+      silenceFrameRef.current = 0;
+      speechDetectedRef.current = false;
+
+      const dataArray = new Uint8Array(analyser.fftSize);
+      let silenceStartTime = null;
+
+      const checkAudio = () => {
+        if (!analyserRef.current) return;
+
+        analyser.getByteTimeDomainData(dataArray);
+
+        // Calculate RMS volume
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          const val = (dataArray[i] - 128) / 128;
+          sum += val * val;
+        }
+        const rms = Math.sqrt(sum / dataArray.length) * 255;
+
+        const elapsed = Date.now() - (listenStartRef.current || Date.now());
+
+        if (rms > SPEECH_THRESHOLD) {
+          // User is speaking
+          if (!speechDetectedRef.current) {
+            speechDetectedRef.current = true;
+            console.log(`[Cloud STT] Speech detected (RMS: ${rms.toFixed(1)})`);
+          }
+          silenceStartTime = null;
+          silenceFrameRef.current = 0;
+        } else if (rms < SILENCE_THRESHOLD && speechDetectedRef.current && elapsed > MIN_RECORDING_MS) {
+          // Silence after speech
+          if (!silenceStartTime) {
+            silenceStartTime = Date.now();
+          }
+          const silenceDuration = Date.now() - silenceStartTime;
+          if (silenceDuration >= SILENCE_DURATION_MS) {
+            console.log(`[Cloud STT] Auto-stopping — ${(silenceDuration / 1000).toFixed(1)}s of silence after speech`);
+            // Auto-stop recording
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+              mediaRecorderRef.current.stop();
+            }
+            stopSilenceDetection();
+            return;
+          }
+        }
+
+        silenceTimerRef.current = requestAnimationFrame(checkAudio);
+      };
+
+      silenceTimerRef.current = requestAnimationFrame(checkAudio);
+      console.log('[Cloud STT] Silence detection started');
+    } catch (err) {
+      console.warn('[Cloud STT] Could not start silence detection:', err);
+    }
+  }, [stopSilenceDetection]);
+
   const startCloudRecording = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      });
       streamRef.current = stream;
       audioChunksRef.current = [];
 
@@ -123,53 +250,7 @@ export function useSpeechRecognition(onResult, sttProvider = 'local', onError) {
         ? 'audio/webm;codecs=opus'
         : 'audio/webm';
       const recorder = new MediaRecorder(stream, { mimeType });
-
-      let silenceTimeout = null;
-      let audioContext = null;
-      let analyser = null;
-      let source = null;
-      let dataArray = null;
-
-      // Silence detection: stop after 1s of silence
-      function setupSilenceDetection() {
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        source = audioContext.createMediaStreamSource(stream);
-        analyser = audioContext.createAnalyser();
-        analyser.fftSize = 2048;
-        source.connect(analyser);
-        dataArray = new Uint8Array(analyser.fftSize);
-
-        function checkSilence() {
-          analyser.getByteTimeDomainData(dataArray);
-          // Calculate RMS (root mean square) to detect silence
-          let sum = 0;
-          for (let i = 0; i < dataArray.length; i++) {
-            const val = (dataArray[i] - 128) / 128;
-            sum += val * val;
-          }
-          const rms = Math.sqrt(sum / dataArray.length);
-          if (rms < 0.01) {
-            // If silence detected, start timeout
-            if (!silenceTimeout) {
-              silenceTimeout = setTimeout(() => {
-                if (recorder.state === 'recording') {
-                  recorder.stop();
-                }
-              }, 1000); // 1s of silence
-            }
-          } else {
-            // If not silent, clear timeout
-            if (silenceTimeout) {
-              clearTimeout(silenceTimeout);
-              silenceTimeout = null;
-            }
-          }
-          if (recorder.state === 'recording') {
-            requestAnimationFrame(checkSilence);
-          }
-        }
-        checkSilence();
-      }
+      console.log(`[Cloud STT] Recording started — mimeType: ${mimeType}`);
 
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data);
@@ -178,74 +259,74 @@ export function useSpeechRecognition(onResult, sttProvider = 'local', onError) {
       recorder.onstop = async () => {
         // Stop all tracks so mic indicator goes away
         stream.getTracks().forEach(t => t.stop());
-        if (audioContext) {
-          audioContext.close();
-        }
-        if (silenceTimeout) {
-          clearTimeout(silenceTimeout);
-        }
 
         const blob = new Blob(audioChunksRef.current, { type: mimeType });
-        if (blob.size === 0) {
+        console.log(`[Cloud STT] Recording stopped — blob: ${blob.size} bytes, chunks: ${audioChunksRef.current.length}`);
+
+        if (blob.size < 1000) {
+          console.warn('[Cloud STT] Audio too short, skipping');
           setIsListening(false);
           return;
         }
 
         const sttStart = listenStartRef.current || Date.now();
 
-        // Convert to base64 and send to server
-        const reader = new FileReader();
-        reader.onload = async () => {
-          try {
-            const base64 = reader.result.split(',')[1];
-            const response = await fetch('/api/stt', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ audioBase64: base64 }),
-            });
+        try {
+          // Send as FormData (no base64 encoding — avoids data corruption)
+          const ext = mimeType.includes('webm') ? 'webm' : 'ogg';
+          const formData = new FormData();
+          formData.append('audio', blob, `recording.${ext}`);
 
-            if (!response.ok) {
-              const err = await response.json().catch(() => ({ error: 'Transcription failed' }));
-              console.error('[Cloud STT] Error:', err.error);
-              setIsListening(false);
-              return;
-            }
+          const response = await fetch('/api/stt', {
+            method: 'POST',
+            body: formData,
+          });
 
-            const data = await response.json();
-            const transcript = data.text || '';
-            const sttSeconds = parseFloat(((Date.now() - sttStart) / 1000).toFixed(1));
-            lastSttDurationRef.current = sttSeconds;
-            console.log(`[Cloud STT] "${transcript}" (${sttSeconds}s)`);
-            if (onResult && transcript.trim()) {
-              onResult(transcript.trim(), sttSeconds);
-            }
-          } catch (err) {
-            console.error('[Cloud STT] Network error:', err);
-          } finally {
+          if (!response.ok) {
+            const err = await response.json().catch(() => ({ error: 'Transcription failed' }));
+            console.error('[Cloud STT] Server error:', err.error);
+            if (onErrorRef.current) onErrorRef.current(err.error);
             setIsListening(false);
+            return;
           }
-        };
-        reader.onerror = () => setIsListening(false);
-        reader.readAsDataURL(blob);
+
+          const data = await response.json();
+          const transcript = data.text || '';
+          const sttSeconds = parseFloat(((Date.now() - sttStart) / 1000).toFixed(1));
+          lastSttDurationRef.current = sttSeconds;
+          console.log(`[Cloud STT] Transcription: "${transcript}" (${sttSeconds}s)`);
+          if (onResultRef.current && transcript.trim()) {
+            onResultRef.current(transcript.trim(), sttSeconds);
+          }
+        } catch (err) {
+          console.error('[Cloud STT] Network error:', err);
+        } finally {
+          setIsListening(false);
+        }
       };
 
       mediaRecorderRef.current = recorder;
       listenStartRef.current = Date.now();
-      recorder.start();
-      setupSilenceDetection();
+      // Collect data in 250ms chunks for reliability
+      recorder.start(250);
       setIsListening(true);
+
+      // Start monitoring audio levels for auto-stop
+      startSilenceDetection(stream);
     } catch (err) {
       console.error('[Cloud STT] Microphone access denied:', err);
+      if (onErrorRef.current) onErrorRef.current('mic-denied');
       setIsListening(false);
     }
-  }, [onResult]);
+  }, [startSilenceDetection]); // Callbacks use stable refs
 
   const stopCloudRecording = useCallback(() => {
+    stopSilenceDetection();
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
     // isListening is set to false in onstop handler after transcription completes
-  }, []);
+  }, [stopSilenceDetection]);
 
   // ---- Public API ----
   const startListening = useCallback(() => {
@@ -257,18 +338,23 @@ export function useSpeechRecognition(onResult, sttProvider = 'local', onError) {
     }
 
     // Local Web Speech API
-    if (!recognitionRef.current) return;
+    if (!recognitionRef.current) {
+      console.error('[Local STT] recognitionRef is null — SpeechRecognition not available');
+      if (onErrorRef.current) onErrorRef.current('not-supported');
+      return;
+    }
     try {
+      console.log('[Local STT] Calling recognition.start()...');
       recognitionRef.current.start();
     } catch (error) {
-      if (onError) {
-        onError(error.name || 'start-failed');
+      if (onErrorRef.current) {
+        onErrorRef.current(error.name || 'start-failed');
       }
       if (error.name !== 'InvalidStateError') {
         console.error('Failed to start speech recognition:', error);
       }
     }
-  }, [isListening, startCloudRecording, onError]);
+  }, [isListening, startCloudRecording]);
 
   const stopListening = useCallback(() => {
     if (sttProviderRef.current === 'cloud') {

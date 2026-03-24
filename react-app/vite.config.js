@@ -16,7 +16,7 @@ export default defineConfig({
     // This keeps API keys secure on the server side
     proxy: {
       '/api': {
-        target: 'https://localhost:3001',
+        target: 'https://127.0.0.1:3001',
         changeOrigin: true,
         secure: false, // Accept self-signed cert
       },
